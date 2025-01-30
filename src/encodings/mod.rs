@@ -1,3 +1,4 @@
+// mod cjk;
 pub mod cmap;
 mod glyphnames;
 mod mappings;
@@ -29,6 +30,7 @@ pub enum Encoding<'a> {
     OneByteEncoding(&'a CodedCharacterSet),
     SimpleEncoding(&'a [u8]),
     UnicodeMapEncoding(ToUnicodeCMap),
+    // JISEncoding(&'a [u8]),
 }
 
 impl std::fmt::Debug for Encoding<'_> {
@@ -46,15 +48,17 @@ impl Encoding<'_> {
     pub fn bytes_to_string(&self, bytes: &[u8]) -> Result<String> {
         match self {
             Self::OneByteEncoding(map) => Ok(bytes_to_string(map, bytes)),
-            Self::SimpleEncoding(b"UniGB-UCS2-H") | Self::SimpleEncoding(b"UniGB-UTF16-H") => {
-                Ok(UTF_16BE.decode(bytes).0.to_string())
-            }
+            Self::SimpleEncoding(b"UniGB-UCS2-H")
+            | Self::SimpleEncoding(b"UniGB-UTF16-H")
+            | Self::SimpleEncoding(b"UniJIS-UTF16-H")
+            | Self::SimpleEncoding(b"UniJIS-UCS2-H") => Ok(UTF_16BE.decode(bytes).0.to_string()),
             Self::UnicodeMapEncoding(unicode_map) => {
                 let mut output_bytes = Vec::new();
 
                 // source codes can have a variadic length from 1 to 4 bytes
                 let mut bytes_in_considered_code = 0u8;
                 let mut considered_source_code = 0u32;
+                // debug!("Decoding bytes with unicode map, bytes: {:?}", bytes);
                 for byte in bytes {
                     if bytes_in_considered_code == 4 {
                         let mut value = unicode_map.get_or_replacement_char(considered_source_code, 4);
@@ -79,6 +83,8 @@ impl Encoding<'_> {
                     .iter()
                     .flat_map(|it| [(it / 256) as u8, (it % 256) as u8])
                     .collect();
+                // debug!("Decoded bytes to utf16: {:?}", utf16_str);
+                // debug!("Decoded bytes to utf16: {:?}", UTF_16BE.decode(&utf16_str));
                 Ok(UTF_16BE.decode(&utf16_str).0.to_string())
             }
             Self::SimpleEncoding(_) => Err(Error::CharacterEncoding),
@@ -88,7 +94,10 @@ impl Encoding<'_> {
     pub fn string_to_bytes(&self, text: &str) -> Vec<u8> {
         match self {
             Self::OneByteEncoding(map) => string_to_bytes(map, text),
-            Self::SimpleEncoding(b"UniGB-UCS2-H") | Self::SimpleEncoding(b"UniGB-UTF16-H") => encode_utf16_be(text),
+            Self::SimpleEncoding(b"UniGB-UCS2-H")
+            | Self::SimpleEncoding(b"UniGB-UTF16-H")
+            | Self::SimpleEncoding(b"UniJIS-UTF16-H")
+            | Self::SimpleEncoding(b"UniJIS-UCS2-H") => encode_utf16_be(text),
             Self::UnicodeMapEncoding(_unicode_map) => {
                 // maybe only possible if the unicode map is an identity?
                 unimplemented!()

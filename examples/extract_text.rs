@@ -1,4 +1,7 @@
+use lopdf::{content::Content, Dictionary, Document, Object, OverwriteDocument, Stream, StringFormat};
 use std::collections::BTreeMap;
+use std::io::Read;
+
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Write};
@@ -6,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
-use lopdf::{Document, Object};
+use env_logger;
+use log::{debug, error, info, warn};
+use lopdf::Reader;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -120,18 +125,14 @@ fn get_pdf_text(doc: &Document) -> Result<PdfText, Error> {
         .into_par_iter()
         .map(
             |(page_num, page_id): (u32, (u32, u16))| -> Result<(u32, Vec<String>), Error> {
-                let text = doc.extract_text(&[page_num]).map_err(|e| {
-                    Error::new(
-                        ErrorKind::Other,
-                        format!("Failed to extract text from page {page_num} id={page_id:?}: {e:}"),
-                    )
-                })?;
-                Ok((
-                    page_num,
-                    text.split('\n')
-                        .map(|s| s.trim_end().to_string())
-                        .collect::<Vec<String>>(),
-                ))
+                // let text = doc.extract_text(&[page_num]).map_err(|e| {
+                //     Error::new(
+                //         ErrorKind::Other,
+                //         format!("Failed to extract text from page {page_num} id={page_id:?}: {e:}"),
+                //     )
+                // })?;
+                // doc.redact_text(page_num, "03");
+                Ok((page_num, vec!["".to_string()]))
             },
         )
         .collect();
@@ -148,32 +149,33 @@ fn get_pdf_text(doc: &Document) -> Result<PdfText, Error> {
     Ok(pdf_text)
 }
 
-fn pdf2text<P: AsRef<Path> + Debug>(path: P, output: P, pretty: bool, password: &str) -> Result<(), Error> {
+fn pdf2text<P: AsRef<Path> + Debug>(path: P, output: P, password: &str) -> Result<(), Error> {
     println!("Load {path:?}");
-    let mut doc = load_pdf(&path)?;
-    if doc.is_encrypted() {
-        doc.decrypt(password)
-            .map_err(|_err| Error::new(ErrorKind::InvalidInput, "Failed to decrypt"))?;
+    let mut ovdoc =
+        OverwriteDocument::load_from_path(&path).map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+    if ovdoc.document.is_encrypted() {
+        debug!("Document is encrypted");
+        ovdoc.set_password("".to_string());
     }
-    let text = get_pdf_text(&doc)?;
-    if !text.errors.is_empty() {
-        eprintln!("{path:?} has {} errors:", text.errors.len());
-        for error in &text.errors[..10] {
-            eprintln!("{error:?}");
-        }
-    }
-    let data = match pretty {
-        true => serde_json::to_string_pretty(&text).unwrap(),
-        false => serde_json::to_string(&text).unwrap(),
-    };
-    println!("Write {output:?}");
-    let mut f = File::create(output)?;
-    f.write_all(data.as_bytes())?;
+    ovdoc.replace_text("株式", "██").unwrap();
+    ovdoc.save(&output).unwrap();
+    // ovdoc.append_object(&new_object).unwrap();
+    // ovdoc.update_object((id, 0), &new_object).unwrap();
+
+    // ovdoc.save(&output).unwrap();
+
+    // doc.replace_stream(id, &stream, &path, &output)?;
+    // Store file in current working directory.
+    // match doc.save(output) {
+    //     Ok(_) => Ok(()),
+    //     Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
+    // }
     Ok(())
 }
 
 fn main() -> Result<(), Error> {
     let args = Args::parse_args();
+    env_logger::init();
 
     let start_time = Instant::now();
     let pdf_path = PathBuf::from(shellexpand::full(args.pdf_path.to_str().unwrap()).unwrap().to_string());
@@ -182,8 +184,8 @@ fn main() -> Result<(), Error> {
         None => args.pdf_path,
     };
     let mut output = PathBuf::from(shellexpand::full(output.to_str().unwrap()).unwrap().to_string());
-    output.set_extension("text");
-    pdf2text(&pdf_path, &output, args.pretty, &args.password)?;
+    output.set_extension("pdf");
+    pdf2text(&pdf_path, &output, &args.password)?;
     println!(
         "Done after {:.1} seconds.",
         Instant::now().duration_since(start_time).as_secs_f64()

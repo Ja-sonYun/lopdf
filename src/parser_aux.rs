@@ -1,5 +1,5 @@
 #![cfg(feature = "nom_parser")]
-use log::warn;
+use log::{debug, warn};
 
 use crate::{
     content::{Content, Operation},
@@ -14,7 +14,7 @@ use crate::{
 use crate::{parser, Dictionary, Object, ObjectId, Stream};
 use std::{
     collections::BTreeMap,
-    io::{Cursor, Read},
+    io::{self, Cursor, Read, Write},
 };
 
 impl Content<Vec<Operation>> {
@@ -30,6 +30,79 @@ impl Stream {
     pub fn decode_content(&self) -> Result<Content<Vec<Operation>>> {
         Content::decode(&self.content)
     }
+}
+
+pub fn get_text_chunks_from_content(
+    content: &Content<Vec<Operation>>, encodings: &BTreeMap<Vec<u8>, Encoding>,
+) -> Result<Vec<Result<String>>> {
+    fn collect_text(text: &mut String, encoding: &Encoding, operands: &[Object]) -> Result<()> {
+        for operand in operands.iter() {
+            match operand {
+                Object::String(bytes, _) => {
+                    text.push_str(&Document::decode_text(encoding, bytes)?);
+                }
+                Object::Array(arr) => {
+                    collect_text(text, encoding, arr)?;
+                    text.push(' ');
+                }
+                Object::Integer(i) => {
+                    if *i < -100 {
+                        text.push(' ');
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let mut collected_chunks_and_errs: Vec<std::result::Result<String, Error>> = Vec::new();
+
+    // each text with different encoding is extracted as separate chunk
+    let mut current_encoding = None;
+    let mut current_text = String::new();
+    for operation in &content.operations {
+        match operation.operator.as_ref() {
+            "Tf" => {
+                let current_font = operation
+                    .operands
+                    .first()
+                    .ok_or_else(|| Error::Syntax("missing font operand".to_string()))?
+                    .as_name();
+                current_encoding = match current_font {
+                    Ok(font) => encodings.get(font),
+                    Err(err) => {
+                        collected_chunks_and_errs.push(Err(err));
+                        None
+                    }
+                };
+
+                if !current_text.is_empty() {
+                    collected_chunks_and_errs.push(Ok(current_text));
+                    current_text = String::new();
+                }
+            }
+            "Tj" | "TJ" => match current_encoding {
+                Some(encoding) => {
+                    let res = collect_text(&mut current_text, encoding, &operation.operands);
+                    if let Err(err) = res {
+                        collected_chunks_and_errs.push(Err(err));
+                    }
+                }
+                None => warn!("Could not decode extracted text"),
+            },
+            "ET" => {
+                if !current_text.ends_with('\n') {
+                    current_text.push('\n')
+                }
+            }
+            _ => {}
+        }
+    }
+    if !current_text.is_empty() {
+        collected_chunks_and_errs.push(Ok(current_text));
+    }
+
+    Ok(collected_chunks_and_errs)
 }
 
 impl Document {
@@ -71,29 +144,15 @@ impl Document {
             .collect()
     }
 
+    fn extract_text_chunks_from_content(
+        &self, content: &Content<Vec<Operation>>, encodings: &BTreeMap<Vec<u8>, Encoding>,
+    ) -> Result<Vec<Result<String>>> {
+        get_text_chunks_from_content(content, encodings)
+    }
+
     fn extract_text_chunks_from_page(
         &self, pages: &BTreeMap<u32, (u32, u16)>, page_number: u32,
     ) -> Result<Vec<Result<String>>> {
-        fn collect_text(text: &mut String, encoding: &Encoding, operands: &[Object]) -> Result<()> {
-            for operand in operands.iter() {
-                match operand {
-                    Object::String(bytes, _) => {
-                        text.push_str(&Document::decode_text(encoding, bytes)?);
-                    }
-                    Object::Array(arr) => {
-                        collect_text(text, encoding, arr)?;
-                        text.push(' ');
-                    }
-                    Object::Integer(i) => {
-                        if *i < -100 {
-                            text.push(' ');
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(())
-        }
         let mut collected_chunks_and_errs: Vec<std::result::Result<String, Error>> = Vec::new();
 
         let page_id = *pages.get(&page_number).ok_or(Error::PageNumberNotFound(page_number))?;
@@ -111,52 +170,10 @@ impl Document {
         let content_data = self.get_page_content(page_id)?;
         let content = Content::decode(&content_data)?;
 
-        // each text with different encoding is extracted as separate chunk
-        let mut current_encoding = None;
-        let mut current_text = String::new();
-        for operation in &content.operations {
-            match operation.operator.as_ref() {
-                "Tf" => {
-                    let current_font = operation
-                        .operands
-                        .first()
-                        .ok_or_else(|| Error::Syntax("missing font operand".to_string()))?
-                        .as_name();
-                    current_encoding = match current_font {
-                        Ok(font) => encodings.get(font),
-                        Err(err) => {
-                            collected_chunks_and_errs.push(Err(err));
-                            None
-                        }
-                    };
-
-                    if !current_text.is_empty() {
-                        collected_chunks_and_errs.push(Ok(current_text));
-                        current_text = String::new();
-                    }
-                }
-                "Tj" | "TJ" => match current_encoding {
-                    Some(encoding) => {
-                        let res = collect_text(&mut current_text, encoding, &operation.operands);
-                        if let Err(err) = res {
-                            collected_chunks_and_errs.push(Err(err));
-                        }
-                    }
-                    None => warn!("Could not decode extracted text"),
-                },
-                "ET" => {
-                    if !current_text.ends_with('\n') {
-                        current_text.push('\n')
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !current_text.is_empty() {
-            collected_chunks_and_errs.push(Ok(current_text));
-        }
-
-        Ok(collected_chunks_and_errs)
+        Ok(collected_chunks_and_errs
+            .into_iter()
+            .chain(self.extract_text_chunks_from_content(&content, &encodings)?.into_iter())
+            .collect())
     }
 
     pub fn replace_text(&mut self, page_number: u32, text: &str, other_text: &str) -> Result<()> {
@@ -242,13 +259,22 @@ impl Document {
     }
 }
 
-fn try_to_replace_encoded_text(
+pub fn try_to_replace_encoded_text(
     operation: &mut Operation, encoding: &Encoding, text_to_replace: &str, replacement: &str,
 ) -> Result<()> {
+    debug!("Replacing text in operation: {:?}", operation);
     for bytes in operation.operands.iter_mut().flat_map(Object::as_str_mut) {
         let decoded_text = Document::decode_text(encoding, bytes)?;
-        if decoded_text == text_to_replace {
-            let encoded_bytes = Document::encode_text(encoding, replacement);
+        debug!("decoded_text: {:?}", decoded_text);
+        println!("decoded_text: {:?}", decoded_text);
+        // *bytes = bytes.clone();
+        // // If text is included in the decoded text, replace it.
+        if decoded_text.contains(text_to_replace) {
+            let new_text = decoded_text.replace(text_to_replace, replacement);
+            debug!("new_text: {:?}", new_text);
+            println!("new_text: {:?}", new_text);
+            let encoded_bytes = Document::encode_text(encoding, &new_text);
+            // debug!("encoded_bytes: {:?}", String::from_utf8(encoded_bytes.clone()).unwrap());
             *bytes = encoded_bytes;
         }
     }
@@ -256,7 +282,7 @@ fn try_to_replace_encoded_text(
 }
 
 /// Decode CrossReferenceStream
-pub fn decode_xref_stream(mut stream: Stream) -> Result<(Xref, Dictionary)> {
+pub fn decode_xref_stream(mut stream: Stream, length: usize) -> Result<(Xref, Dictionary)> {
     if stream.is_compressed() {
         stream.decompress()?;
     }
@@ -267,6 +293,7 @@ pub fn decode_xref_stream(mut stream: Stream) -> Result<(Xref, Dictionary)> {
         .and_then(Object::as_i64)
         .map_err(|_| ParseError::InvalidXref)?;
     let mut xref = Xref::new(size as u32, XrefType::CrossReferenceStream);
+    xref.bytes_len = Some(length);
     {
         let section_indice = dict
             .get(b"Index")

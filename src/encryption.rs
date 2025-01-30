@@ -1,7 +1,10 @@
 use crate::rc4::Rc4;
 use crate::{Document, Object, ObjectId};
+use aes::cipher::BlockEncryptMut;
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use cbc::Encryptor;
 use md5::{Digest as _, Md5};
+use rand::{rng, RngCore};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -252,6 +255,76 @@ where
     } else {
         // Decrypt using the rc4 algorithm
         Ok(Rc4::new(rc4_key).decrypt(encrypted))
+    }
+}
+
+/// Encrypts data for a PDF object.
+///
+/// * `key` - The master PDF encryption key (already derived via `get_encryption_key()`).
+/// * `obj_id` - The `(object_number, generation_number)` tuple for this object.
+/// * `data` - The plaintext to encrypt.
+/// * `aes` - `true` for AES-128-CBC, `false` for RC4.
+///
+/// Returns a `Vec<u8>` containing the encrypted bytes.
+pub fn encrypt_data<Key>(key: Key, obj_id: ObjectId, obj: &Object, aes: bool) -> Result<Vec<u8>, DecryptionError>
+where
+    Key: AsRef<[u8]>,
+{
+    let data = match obj {
+        Object::String(content, _) => content,
+        Object::Stream(stream) => &stream.content,
+        _ => {
+            return Err(DecryptionError::NotDecryptable);
+        }
+    };
+
+    let key = key.as_ref();
+
+    // According to PDF 1.7 spec, the per-object key is formed as:
+    //    (master_key + object_number + generation_number + [optional sAlT]) -> MD5 -> up to 16 bytes
+    let len = if aes { key.len() + 9 } else { key.len() + 5 };
+    let mut builder = Vec::<u8>::with_capacity(len);
+
+    // 1) Add the master key
+    builder.extend_from_slice(key);
+
+    // 2) Add the lower 3 bytes of the object number
+    builder.extend_from_slice(&obj_id.0.to_le_bytes()[..3]);
+    // 3) Add the lower 2 bytes of the generation number
+    builder.extend_from_slice(&obj_id.1.to_le_bytes()[..2]);
+
+    // 4) If using AES, append "sAlT" (0x73, 0x41, 0x6C, 0x54)
+    if aes {
+        builder.extend_from_slice(&[0x73, 0x41, 0x6C, 0x54]);
+    }
+
+    // 5) Compute the MD5 hash of the builder. Use up to 16 bytes of the result.
+    let key_len = std::cmp::min(key.len() + 5, 16);
+    let rc4_key = &Md5::digest(builder)[..key_len];
+
+    // --- Perform encryption ---
+    if aes {
+        // AES-128 CBC
+        // 1) Generate a 16-byte random IV
+        let mut iv = [0u8; 16];
+        rng().fill_bytes(&mut iv);
+
+        // 2) Apply PKCS#7 padding and encrypt
+        let mut data_buf = data.to_vec();
+        let cipher = Encryptor::<aes::Aes128>::new(rc4_key.into(), &iv.into());
+        let ciphertext = cipher
+            .encrypt_padded_mut::<Pkcs7>(&mut data_buf, data.len())
+            .map_err(|_| DecryptionError::UnsupportedEncryption)?;
+
+        // 3) Final result = [IV + encrypted_data]
+        let mut result = iv.to_vec();
+        result.extend_from_slice(ciphertext);
+        Ok(result)
+    } else {
+        // RC4
+        // Plaintext -> RC4(key) -> Encrypted data
+        let encrypted = Rc4::new(rc4_key).encrypt(data);
+        Ok(encrypted)
     }
 }
 

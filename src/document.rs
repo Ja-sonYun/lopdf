@@ -262,18 +262,42 @@ impl Document {
 
     /// Replaces all encrypted Strings and Streams with their decrypted contents
     pub fn decrypt<P: AsRef<[u8]>>(&mut self, password: P) -> Result<()> {
-        // Find the ID of the encryption dict; we'll want to skip it when decrypting
         let encryption_obj_id = self.trailer.get(b"Encrypt").and_then(Object::as_reference)?;
+        let metadata_is_encrypted = self.get_metadata_encryption_status(encryption_obj_id)?;
+        let key = encryption::get_encryption_key(self, &password, true)?;
+        let is_aes = self.is_aes_encryption()?;
 
-        // Since PDF 1.5, metadata may or may not be encrypted; defaults to true
-        let metadata_is_encrypted = self
+        for (&id, obj) in self.objects.iter_mut() {
+            if id == encryption_obj_id {
+                continue;
+            }
+
+            if obj.type_name().ok() == Some(b"Metadata") && !metadata_is_encrypted {
+                continue;
+            }
+
+            if let Err(err) = Self::decrypt_object_in_place(id, obj, &key, is_aes) {
+                return Err(err);
+            }
+        }
+
+        self.decrypt_info_dictionary(&key, is_aes)?;
+        self.trailer.remove(b"Encrypt");
+        Ok(())
+    }
+
+    /// Gets whether metadata is encrypted
+    fn get_metadata_encryption_status(&self, encryption_obj_id: ObjectId) -> Result<bool> {
+        Ok(self
             .get_object(encryption_obj_id)?
             .as_dict()?
             .get(b"EncryptMetadata")
             .and_then(|o| o.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(true))
+    }
 
-        let key = encryption::get_encryption_key(self, &password, true)?;
+    /// Determines if AES encryption is used
+    fn is_aes_encryption(&self) -> Result<bool> {
         let cfm = self
             .get_encrypted()?
             .get(b"CF")?
@@ -283,50 +307,163 @@ impl Document {
             .get(b"CFM")?
             .as_name()
             .unwrap_or_default();
-        let is_aes = cfm == b"AESV2";
-        for (&id, obj) in self.objects.iter_mut() {
-            // The encryption dictionary is not encrypted, leave it alone
-            if id == encryption_obj_id {
-                continue;
-            }
+        Ok(cfm == b"AESV2")
+    }
 
-            // If a Metadata stream but metadata isn't encrypted, leave it alone
-            if obj.type_name().ok() == Some(b"Metadata") && !metadata_is_encrypted {
-                continue;
-            }
+    /// Decrypts a single object in place
+    fn decrypt_object_in_place(id: ObjectId, obj: &mut Object, key: &[u8], is_aes: bool) -> Result<()> {
+        let decrypted = match encryption::decrypt_object(key, id, &*obj, is_aes) {
+            Ok(content) => content,
+            Err(encryption::DecryptionError::NotDecryptable) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
 
-            let decrypted = match encryption::decrypt_object(&key, id, &*obj, is_aes) {
-                Ok(content) => content,
-                Err(encryption::DecryptionError::NotDecryptable) => {
-                    continue;
-                }
-                Err(_err) => {
-                    return Err(_err.into());
-                }
-            };
-
-            // Only strings and streams are encrypted
-            match obj {
-                Object::Stream(stream) => stream.set_content(decrypted),
-                Object::String(content, _) => *content = decrypted,
-                _ => {}
-            }
+        match obj {
+            Object::Stream(stream) => stream.set_content(decrypted),
+            Object::String(content, _) => *content = decrypted,
+            _ => {}
         }
 
+        Ok(())
+    }
+
+    fn encrypt_object_in_place(id: ObjectId, obj: &mut Object, key: &[u8], is_aes: bool) -> Result<()> {
+        let encrypted = encryption::encrypt_data(key, id, &*obj, is_aes)?;
+        match obj {
+            Object::Stream(stream) => stream.set_content(encrypted),
+            Object::String(content, _) => *content = encrypted,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn decrypt_object<P: AsRef<[u8]>>(&self, id: ObjectId, obj: &mut Object, password: P) -> Result<()> {
+        let encryption_obj_id = self.trailer.get(b"Encrypt").and_then(Object::as_reference)?;
+        let metadata_is_encrypted = self.get_metadata_encryption_status(encryption_obj_id)?;
+        let key = encryption::get_encryption_key(self, &password, true)?;
+        let is_aes = self.is_aes_encryption()?;
+
+        if id == encryption_obj_id {
+            return Ok(());
+        }
+        if obj.type_name().ok() == Some(b"Metadata") && !metadata_is_encrypted {
+            return Ok(());
+        }
+
+        Self::decrypt_object_in_place(id, obj, &key, is_aes)
+    }
+
+    pub fn encrypt_object<P: AsRef<[u8]>>(&self, id: ObjectId, obj: &mut Object, password: P) -> Result<()> {
+        let encryption_obj_id = self.trailer.get(b"Encrypt").and_then(Object::as_reference)?;
+        let metadata_is_encrypted = self.get_metadata_encryption_status(encryption_obj_id)?;
+        let key = encryption::get_encryption_key(self, &password, true)?;
+        let is_aes = self.is_aes_encryption()?;
+
+        if id == encryption_obj_id {
+            return Ok(());
+        }
+        if obj.type_name().ok() == Some(b"Metadata") && !metadata_is_encrypted {
+            return Ok(());
+        }
+
+        Self::encrypt_object_in_place(id, obj, &key, is_aes)
+    }
+
+    /// Decrypts the info dictionary if it exists
+    fn decrypt_info_dictionary(&mut self, key: &[u8], is_aes: bool) -> Result<()> {
         if let Ok(info_obj_id) = self.trailer.get(b"Info").and_then(Object::as_reference) {
             if let Ok(info_dict) = self.get_object_mut(info_obj_id).and_then(Object::as_dict_mut) {
                 for (_, info_obj) in info_dict.iter_mut() {
-                    if let Ok(content) = encryption::decrypt_object(&key, info_obj_id, &*info_obj, is_aes) {
+                    if let Ok(content) = encryption::decrypt_object(key, info_obj_id, &*info_obj, is_aes) {
                         info_obj.as_str_mut()?.clear();
                         info_obj.as_str_mut()?.extend(content);
                     };
                 }
             }
         }
-
-        self.trailer.remove(b"Encrypt");
         Ok(())
     }
+
+    /// Encrypts a single object
+    // fn encrypt_object(&mut self, id: u32, obj: &mut Object, key: &[u8], is_aes: bool) -> Result<()> {
+    //     let encrypted = encryption::encrypt_object(key, id, &*obj, is_aes)?;
+
+    //     match obj {
+    //         Object::Stream(stream) => stream.set_content(encrypted),
+    //         Object::String(content, _) => *content = encrypted,
+    //         _ => {}
+    //     }
+
+    //     Ok(())
+    // }
+
+    /// Replaces all encrypted Strings and Streams with their decrypted contents
+    // pub fn decrypt<P: AsRef<[u8]>>(&mut self, password: P) -> Result<()> {
+    //     // Find the ID of the encryption dict; we'll want to skip it when decrypting
+    //     let encryption_obj_id = self.trailer.get(b"Encrypt").and_then(Object::as_reference)?;
+
+    //     // Since PDF 1.5, metadata may or may not be encrypted; defaults to true
+    //     let metadata_is_encrypted = self
+    //         .get_object(encryption_obj_id)?
+    //         .as_dict()?
+    //         .get(b"EncryptMetadata")
+    //         .and_then(|o| o.as_bool())
+    //         .unwrap_or(true);
+
+    //     let key = encryption::get_encryption_key(self, &password, true)?;
+    //     let cfm = self
+    //         .get_encrypted()?
+    //         .get(b"CF")?
+    //         .as_dict()?
+    //         .get(b"StdCF")?
+    //         .as_dict()?
+    //         .get(b"CFM")?
+    //         .as_name()
+    //         .unwrap_or_default();
+    //     let is_aes = cfm == b"AESV2";
+    //     for (&id, obj) in self.objects.iter_mut() {
+    //         // The encryption dictionary is not encrypted, leave it alone
+    //         if id == encryption_obj_id {
+    //             continue;
+    //         }
+
+    //         // If a Metadata stream but metadata isn't encrypted, leave it alone
+    //         if obj.type_name().ok() == Some(b"Metadata") && !metadata_is_encrypted {
+    //             continue;
+    //         }
+
+    //         let decrypted = match encryption::decrypt_object(&key, id, &*obj, is_aes) {
+    //             Ok(content) => content,
+    //             Err(encryption::DecryptionError::NotDecryptable) => {
+    //                 continue;
+    //             }
+    //             Err(_err) => {
+    //                 return Err(_err.into());
+    //             }
+    //         };
+
+    //         // Only strings and streams are encrypted
+    //         match obj {
+    //             Object::Stream(stream) => stream.set_content(decrypted),
+    //             Object::String(content, _) => *content = decrypted,
+    //             _ => {}
+    //         }
+    //     }
+
+    //     if let Ok(info_obj_id) = self.trailer.get(b"Info").and_then(Object::as_reference) {
+    //         if let Ok(info_dict) = self.get_object_mut(info_obj_id).and_then(Object::as_dict_mut) {
+    //             for (_, info_obj) in info_dict.iter_mut() {
+    //                 if let Ok(content) = encryption::decrypt_object(&key, info_obj_id, &*info_obj, is_aes) {
+    //                     info_obj.as_str_mut()?.clear();
+    //                     info_obj.as_str_mut()?.extend(content);
+    //                 };
+    //             }
+    //         }
+    //     }
+
+    //     self.trailer.remove(b"Encrypt");
+    //     Ok(())
+    // }
 
     /// Return the PDF document catalog, which is the root of the document's object graph.
     pub fn catalog(&self) -> Result<&Dictionary> {
@@ -577,12 +714,21 @@ impl Document {
     }
 
     pub fn decode_text(encoding: &Encoding, bytes: &[u8]) -> Result<String> {
-        debug!("Decoding text with {:#?}", encoding);
         encoding.bytes_to_string(bytes)
     }
 
     pub fn encode_text(encoding: &Encoding, text: &str) -> Vec<u8> {
         encoding.string_to_bytes(text)
+    }
+
+    pub fn get_encodings(&self, page_id: ObjectId) -> Result<BTreeMap<Vec<u8>, Encoding>> {
+        let encodings: BTreeMap<Vec<u8>, Encoding> = self
+            .get_page_fonts(page_id)?
+            .into_iter()
+            .map(|(name, font)| font.get_font_encoding(self).map(|it| (name, it)))
+            .collect::<Result<BTreeMap<Vec<u8>, Encoding>>>()?;
+
+        Ok(encodings)
     }
 }
 

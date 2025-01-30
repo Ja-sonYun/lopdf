@@ -4,7 +4,7 @@ use crate::encodings::Encoding;
 use crate::error::DecompressError;
 use crate::{Document, Error, Result};
 use indexmap::IndexMap;
-use log::warn;
+use log::{debug, warn};
 use std::cmp::max;
 use std::fmt;
 use std::str;
@@ -316,13 +316,13 @@ impl fmt::Debug for Object {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Object::Null => write!(f, "Null"),
-            Object::Boolean(value) => write!(f, "{}", value),
-            Object::Integer(value) => write!(f, "{}", value),
-            Object::Real(value) => write!(f, "{}", value),
-            Object::Name(name) => write!(f, "/{}", String::from_utf8_lossy(name)),
-            Object::String(text, StringFormat::Literal) => write!(f, "({})", String::from_utf8_lossy(text)),
+            Object::Boolean(value) => write!(f, "Bool {}", value),
+            Object::Integer(value) => write!(f, "Integer {}", value),
+            Object::Real(value) => write!(f, "Read {}", value),
+            Object::Name(name) => write!(f, "/Name {}", String::from_utf8_lossy(name)),
+            Object::String(text, StringFormat::Literal) => write!(f, "Literal ({})", String::from_utf8_lossy(text)),
             Object::String(text, StringFormat::Hexadecimal) => {
-                write!(f, "<")?;
+                write!(f, "Hex <")?;
                 for b in text {
                     write!(f, "{:02x}", b)?;
                 }
@@ -330,9 +330,9 @@ impl fmt::Debug for Object {
             }
             Object::Array(array) => {
                 let items = array.iter().map(|item| format!("{:?}", item)).collect::<Vec<String>>();
-                write!(f, "[{}]", items.join(" "))
+                write!(f, "Array [{}]", items.join(" "))
             }
-            Object::Dictionary(dict) => write!(f, "{:?}", dict),
+            Object::Dictionary(dict) => write!(f, "Dict {:?}", dict),
             Object::Stream(stream) => write!(f, "{:?}stream...endstream", stream.dict),
             Object::Reference(id) => write!(f, "{} {} R", id.0, id.1),
         }
@@ -411,6 +411,13 @@ impl Dictionary {
                 found: String::from_utf8_lossy(self.get_type().unwrap_or(b"None")).to_string(),
             });
         }
+        let fontname = self.get(b"Encoding").and_then(Object::as_name);
+        // bytes to string
+        let fontnamestr = match fontname {
+            Ok(name) => str::from_utf8(name).unwrap_or_default(),
+            Err(_) => "",
+        };
+        debug!("FontName: {:?}", fontnamestr);
 
         // Note: currently not all encodings are handled, not implemented:
         // - dictionary differences encoding
@@ -426,6 +433,42 @@ impl Dictionary {
             Ok(b"PDFDocEncoding") => {
                 log::warn!("PDFDocEncoding is not a valid character encoding for a font");
                 Ok(Encoding::OneByteEncoding(&encodings::PDF_DOC_ENCODING))
+            }
+            Ok(b"UniGB-UCS2-H") => Ok(Encoding::SimpleEncoding(b"UniGB-UCS2-H")),
+            Ok(b"UniJIS-UCS2-H") | Ok(b"UniJIS-UTF16-H") => {
+                // NOTE: DescendantFonts is a one-element array according to the PDF1.7 spec
+                let cidfont_index = match self.get_deref(b"DescendantFonts", doc)? {
+                    Object::Array(array) => match array.first().unwrap() {
+                        Object::Reference(dict) => dict,
+                        _ => {
+                            return Err(Error::InvalidObjectStream {
+                                0: "DescendantFonts".to_string(),
+                            });
+                        }
+                    },
+                    _ => {
+                        return Err(Error::InvalidObjectStream {
+                            0: "DescendantFonts".to_string(),
+                        });
+                    }
+                };
+                let cidfont_dict = match doc.get_object(*cidfont_index) {
+                    Ok(Object::Dictionary(dict)) => dict,
+                    _ => {
+                        return Err(Error::InvalidObjectStream {
+                            0: "DescendantFonts".to_string(),
+                        });
+                    }
+                };
+                let font_descriptor = match cidfont_dict.get(b"FontDescriptor") {
+                    Ok(Object::Reference(id)) => doc.get_object(*id),
+                    _ => {
+                        return Err(Error::InvalidObjectStream {
+                            0: "FontDescriptorItem".to_string(),
+                        });
+                    }
+                };
+                Ok(Encoding::SimpleEncoding(b"UniJIS-UCS2-H"))
             }
             Ok(b"Identity-H") | Ok(b"Identity-V") => {
                 let stream = self.get_deref(b"ToUnicode", doc)?.as_stream()?;
@@ -552,11 +595,13 @@ macro_rules! dictionary {
 
 impl fmt::Debug for Dictionary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let entries = self
-            .into_iter()
-            .map(|(key, value)| format!("/{} {:?}", String::from_utf8_lossy(key), value))
-            .collect::<Vec<String>>();
-        write!(f, "<<{}>>", entries.concat())
+        // print as is
+        write!(f, "{:?}", self.0)
+        // let entries = self
+        //     .into_iter()
+        //     .map(|(key, value)| format!("/{} {:?}", String::from_utf8_lossy(key), value))
+        //     .collect::<Vec<String>>();
+        // write!(f, "<<{}>>", entries.concat())
     }
 }
 
@@ -669,10 +714,9 @@ impl Stream {
             let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
             encoder.write_all(self.content.as_slice())?;
             let compressed = encoder.finish()?;
-            if compressed.len() + 19 < self.content.len() {
-                self.dict.set("Filter", "FlateDecode");
-                self.set_content(compressed);
-            }
+
+            self.dict.set("Filter", "FlateDecode");
+            self.set_content(compressed);
         }
         Ok(())
     }

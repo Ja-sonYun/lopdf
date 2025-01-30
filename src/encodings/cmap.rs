@@ -2,7 +2,7 @@ use crate::cmap_section::{CMapParseError, CMapSection, CodeLen, SourceCode};
 use crate::parser::cmap_parser::parse;
 use crate::parser::ParserInput;
 
-use log::error;
+use log::{debug, error};
 use rangemap::RangeInclusiveMap;
 use thiserror::Error;
 

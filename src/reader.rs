@@ -1,5 +1,7 @@
+use log::debug;
 #[cfg(feature = "nom_parser")]
 use log::{error, warn};
+use nom::AsBytes;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 use std::convert::TryInto;
@@ -216,13 +218,16 @@ pub const MAX_BRACKET: usize = 100;
 impl Reader<'_> {
     /// Read whole document.
     pub fn read(mut self, filter_func: Option<FilterFunc>) -> Result<Document> {
+        let mut cursor = 0;
         let offset = self.buffer.windows(5).position(|w| w == b"%PDF-").unwrap_or(0);
+        cursor += offset + 5;
         self.buffer = &self.buffer[offset..];
 
         // The document structure can be expressed in PEG as:
         //   document <- header indirect_object* xref trailer xref_start
         let version =
             parser::header(ParserInput::new_extra(self.buffer, "header")).ok_or(ParseError::InvalidFileHeader)?;
+        cursor += version.len();
 
         //The binary_mark is in line 2 after the pdf version. If at other line number, then will be declared as invalid pdf.
         if let Some(pos) = self.buffer.iter().position(|&byte| byte == b'\n') {
@@ -230,8 +235,9 @@ impl Reader<'_> {
                 parser::binary_mark(ParserInput::new_extra(&self.buffer[pos + 1..], "binary_mark"))
                     .unwrap_or(self.document.binary_mark);
         }
+        cursor += self.document.binary_mark.len();
 
-        let xref_start = Self::get_xref_start(self.buffer)?;
+        let (xref_start, _) = Self::get_xref_range(self.buffer)?;
         if xref_start > self.buffer.len() {
             return Err(Error::Xref(XrefError::Start));
         }
@@ -289,7 +295,7 @@ impl Reader<'_> {
 
         let entries_filter_map = |(_, entry): (&_, &_)| {
             if let XrefEntry::Normal { offset, .. } = *entry {
-                let (object_id, mut object) = self
+                let (object_id, mut object, _) = self
                     .read_object(offset as usize, None, &mut HashSet::new())
                     .map_err(|e| error!("Object load error: {:?}", e))
                     .ok()?;
@@ -412,14 +418,14 @@ impl Reader<'_> {
         }
         already_seen.insert(id);
         let offset = self.get_offset(id)?;
-        let (_, obj) = self.read_object(offset as usize, Some(id), already_seen)?;
+        let (_, obj, _) = self.read_object(offset as usize, Some(id), already_seen)?;
 
         Ok(obj)
     }
 
-    fn read_object(
+    pub fn read_object(
         &self, offset: usize, expected_id: Option<ObjectId>, already_seen: &mut HashSet<ObjectId>,
-    ) -> Result<(ObjectId, Object)> {
+    ) -> Result<(ObjectId, Object, usize)> {
         if offset > self.buffer.len() {
             return Err(Error::InvalidOffset(offset));
         }
@@ -433,7 +439,7 @@ impl Reader<'_> {
         )
     }
 
-    fn get_xref_start(buffer: &[u8]) -> Result<usize> {
+    pub fn get_xref_range(buffer: &[u8]) -> Result<(usize, usize)> {
         let seek_pos = buffer.len() - cmp::min(buffer.len(), 512);
         Self::search_substring(buffer, b"%%EOF", seek_pos)
             .and_then(|eof_pos| if eof_pos > 25 { Some(eof_pos) } else { None })
@@ -441,14 +447,40 @@ impl Reader<'_> {
             .ok_or(Error::Xref(XrefError::Start))
             .and_then(|xref_pos| {
                 if xref_pos <= buffer.len() {
+                    let endxref = buffer.len() - 25;
                     match parser::xref_start(ParserInput::new_extra(&buffer[xref_pos..], "xref")) {
-                        Some(startxref) => Ok(startxref as usize),
+                        Some(startxref) => Ok((startxref as usize, endxref as usize)),
                         None => Err(Error::Xref(XrefError::Start)),
                     }
                 } else {
                     Err(Error::Xref(XrefError::Start))
                 }
             })
+            .and_then(|(startxref, endxref)| {
+                let xref_content = &buffer[startxref..endxref];
+                let endxref = startxref + Self::remove_comment_lines_and_get_last_pos(xref_content).unwrap();
+                Ok((
+                    startxref,
+                    endxref - 1, // Remove the last newline
+                ))
+            })
+    }
+
+    fn remove_comment_lines_and_get_last_pos(buffer: &[u8]) -> Option<usize> {
+        let lines: Vec<&[u8]> = buffer.split(|&b| b == b'\n').collect();
+        let mut cursor = 0;
+
+        for (_, line) in lines.iter().enumerate().rev() {
+            let trimmed = line.iter().skip_while(|&&b| b == b' ' || b == b'\t');
+            if let Some(&first_char) = trimmed.clone().next() {
+                if first_char != b'%' {
+                    let line_start_pos = buffer.len() - cursor;
+                    return Some(line_start_pos);
+                }
+                cursor += line.as_bytes().len() + 1;
+            }
+        }
+        None
     }
 
     fn search_substring(buffer: &[u8], pattern: &[u8], start_pos: usize) -> Option<usize> {
@@ -540,13 +572,13 @@ endstream endobj\n",
     let doc = format!(
         "{}xref
 0 7
-0000000000 65535 f 
-0000000009 00000 n 
-0000000096 00000 n 
-0000000155 00000 n 
-0000000291 00000 n 
-0000000191 00000 n 
-0000000248 00000 n 
+0000000000 65535 f
+0000000009 00000 n
+0000000096 00000 n
+0000000155 00000 n
+0000000291 00000 n
+0000000191 00000 n
+0000000248 00000 n
 trailer
 <</Root 6 0 R/Size 7>>
 startxref
@@ -591,14 +623,14 @@ endstream endobj\n",
     let doc = format!(
         "{}xref
 0 7
-0000000000 65535 f 
-0000000009 00000 n 
-0000000096 00000 n 
-0000000155 00000 n 
-0000000387 00000 n 
-0000000191 00000 n 
-0000000254 00000 n 
-0000000297 00000 n 
+0000000000 65535 f
+0000000009 00000 n
+0000000096 00000 n
+0000000155 00000 n
+0000000387 00000 n
+0000000191 00000 n
+0000000254 00000 n
+0000000297 00000 n
 trailer
 <</Root 6 0 R/Size 7>>
 startxref

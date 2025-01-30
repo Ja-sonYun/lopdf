@@ -1,11 +1,25 @@
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufWriter, Result, Write};
+use std::io::{self, BufWriter, Result, Write};
 use std::path::Path;
+use std::string::String;
 use std::vec;
+
+use log::debug;
 
 use super::Object::*;
 use super::{Dictionary, Document, Object, Stream, StringFormat};
-use crate::{xref::*, IncrementalDocument};
+use crate::overwrite_document::OverwriteDocument;
+use crate::parser::ParserInput;
+use crate::{parser, xref::*, Error, IncrementalDocument, ObjectId, Reader};
+
+impl Object {
+    fn as_bytes(&self, id: ObjectId) -> Vec<u8> {
+        let mut buf = Vec::new();
+        Writer::_write_indirect_object(&mut buf, id.0, id.1, self).unwrap();
+        buf
+    }
+}
 
 impl Document {
     /// Save PDF document to specified file path.
@@ -90,7 +104,7 @@ impl Document {
         // Note that `ASCIIHexDecode` does not work correctly,
         // but is still useful for debugging sometimes.
         let filter = XRefStreamFilter::None;
-        let (stream, stream_length, indexes) = Writer::create_xref_steam(xref, filter)?;
+        let (stream, stream_length, indexes) = Writer::create_xref_stream(xref, filter)?;
         self.trailer.set("Index", indexes);
 
         if filter == XRefStreamFilter::ASCIIHexDecode {
@@ -197,6 +211,364 @@ impl IncrementalDocument {
     }
 }
 
+impl OverwriteDocument {
+    pub fn save<P: AsRef<Path>>(&mut self, path: P) -> Result<File> {
+        let mut file = BufWriter::new(File::create(path)?);
+        file.write_all(&self.bytes_documents)?;
+        Ok(file.into_inner()?)
+    }
+
+    pub fn attempt_decrypt_if_encrypted(&mut self, password: Option<&str>) -> Result<()> {
+        let password = password.unwrap_or("");
+        if self.document.is_encrypted() {
+            self.document
+                .decrypt(password)
+                .map_err(|_err| io::Error::new(io::ErrorKind::InvalidInput, "Failed to decrypt"))?;
+        }
+        Ok(())
+    }
+
+    pub fn replace_text(&mut self, text: &str, replacement: &str) -> Result<()> {
+        let mut should_be_updated = Vec::<(ObjectId, Object)>::new();
+
+        for page_id in self.document.page_iter() {
+            println!("Page id: {:?}", page_id);
+            let encodings = self.document.get_encodings(page_id).unwrap();
+            let object_ids = self.document.get_page_contents(page_id);
+            let objects = object_ids
+                .iter()
+                .map(|object_id| {
+                    let mut object = self.document.get_object(*object_id).unwrap().clone();
+                    if self.document.is_encrypted() {
+                        let password = self.password.as_ref().unwrap();
+                        self.document
+                            .decrypt_object(*object_id, &mut object, &password)
+                            .unwrap();
+                    }
+                    (object_id, object)
+                })
+                .collect::<Vec<_>>();
+
+            println!("objects: {:?}", objects.len());
+
+            for (object_id, object) in objects {
+                println!("object_id: {:?}", object_id);
+                let mut refined_object = Object::from(
+                    object
+                        .as_stream()
+                        .unwrap()
+                        .replace_text(&encodings, text, replacement)
+                        .unwrap(),
+                );
+                if self.document.is_encrypted() {
+                    let password = self.password.as_ref().unwrap();
+                    self.document
+                        .encrypt_object(*object_id, &mut refined_object, &password)
+                        .unwrap();
+                }
+                should_be_updated.push((object_id.clone(), refined_object));
+            }
+        }
+
+        // let target_obj = should_be_updated[1].1.clone();
+        // // let target_id = should_be_updated[1].0.clone();
+
+        // debug!("Should be updated: {:?}", should_be_updated[1].0);
+        // self.update_object(should_be_updated[1].0, &target_obj).unwrap();
+        for (id, object) in should_be_updated {
+            self.update_object(id, &object).unwrap();
+        }
+
+        Ok(())
+    }
+
+    fn verify_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
+        self.document = Reader {
+            buffer: &buffer,
+            document: Document::new(),
+        }
+        .read(None)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        self.bytes_documents = buffer;
+        Ok(())
+    }
+
+    fn get_object_offset(&self, id: ObjectId) -> Result<u32> {
+        let entry = self
+            .document
+            .reference_table
+            .get(id.0)
+            .ok_or(Error::MissingXrefEntry)
+            .unwrap();
+        match *entry {
+            XrefEntry::Normal { offset, generation } if generation == id.1 => Ok(offset),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Object is not a normal object",
+            )),
+        }
+    }
+
+    fn inject_at_position(buffer: &Vec<u8>, data: Vec<u8>, position: usize) -> Vec<u8> {
+        if position > buffer.len() {
+            panic!("Invalid position specified!");
+        }
+
+        // Create a new buffer with injected data
+        let mut new_buffer = Vec::<u8>::new();
+        new_buffer.extend_from_slice(&buffer[..position]); // Keep data before injection
+        new_buffer.extend(data.clone()); // Inject new data
+        new_buffer.extend_from_slice(&buffer[position..]); // Append remaining buffer
+        new_buffer
+    }
+
+    fn replace_range_in_buffer(buffer: &Vec<u8>, data: Vec<u8>, range: (usize, usize)) -> Vec<u8> {
+        let (start_offset, end_offset) = range;
+
+        // Validate the range
+        if start_offset > buffer.len() || end_offset > buffer.len() || start_offset > end_offset {
+            panic!("Invalid range specified!");
+        }
+
+        // Create a new buffer
+        let mut new_buffer = Vec::<u8>::new();
+        new_buffer.extend_from_slice(&buffer[..start_offset]);
+        new_buffer.extend(data.clone());
+        new_buffer.extend_from_slice(&buffer[end_offset..]);
+
+        new_buffer
+    }
+
+    fn update_xref<F: FnMut(&mut Xref, fn(&mut Xref, usize, isize)) -> i64>(
+        buffer: &Vec<u8>, updater: &mut F,
+    ) -> Vec<u8> {
+        let reader = Reader {
+            buffer: &buffer,
+            document: Document::new(), // We don't need the document here
+        };
+        let (xref_start, xref_end) = Reader::get_xref_range(buffer).unwrap();
+        let (mut xref, mut trailer) =
+            parser::xref_and_trailer(ParserInput::new_extra(&buffer[xref_start..], "xref"), &reader).unwrap();
+
+        // Update the Xref
+        let shift_length = updater(&mut xref, |xref: &mut Xref, updated_obj_offset, shift_length| {
+            for (_, entry) in xref.entries.iter_mut() {
+                if let XrefEntry::Normal { offset, generation: _ } = entry {
+                    // if offset is greater than the new object offset,
+                    // increase the offset by the difference in length
+                    if *offset > updated_obj_offset as u32 {
+                        if shift_length > 0 {
+                            *offset += shift_length as u32;
+                        } else {
+                            *offset -= (shift_length * -1) as u32;
+                        }
+                    }
+                }
+            }
+        });
+
+        let new_xref_start = if shift_length > 0 {
+            xref_start + shift_length as usize
+        } else {
+            xref_start - (shift_length * -1) as usize
+        };
+
+        // Prepare new xref stream
+        let find_xref_stream = reader.read_object(xref_start, None, &mut HashSet::new());
+        let ((xref_id, xref_gen), xref_obj) = match find_xref_stream {
+            Ok(((xref_id, xref_gen), mut xref_obj, _)) => {
+                // Expect a Stream xref object
+                let (xref_stream, _, _) = Writer::create_xref_stream(&xref, XRefStreamFilter::None).unwrap();
+                let xref_stream_obj = xref_obj.as_stream_mut().unwrap();
+                if xref_stream_obj.dict.has(b"Filter") {
+                    xref_stream_obj.decompress().unwrap();
+                }
+                xref_stream_obj.set_content(xref_stream);
+                xref_stream_obj.compress().unwrap();
+                let xref_obj = Object::Stream(xref_stream_obj.clone());
+
+                ((xref_id, xref_gen), xref_obj)
+            }
+            Err(_) => {
+                let last_xref_id = xref.entries.keys().max().unwrap();
+                let (new_xref_id, new_xref_gen) = (last_xref_id + 1, 0);
+                xref.entries.insert(
+                    new_xref_id,
+                    XrefEntry::Normal {
+                        offset: new_xref_start as u32,
+                        generation: new_xref_gen,
+                    },
+                );
+
+                // Update trailer as xref stream object
+                trailer.set("Type", Name(b"XRef".to_vec()));
+                trailer.set("Size", i64::from(new_xref_id + 1));
+                // See `Document::write_cross_reference_stream`
+                trailer.set("W", Array(vec![Integer(1), Integer(4), Integer(2)]));
+
+                let (xref_stream, stream_length, indexes) =
+                    Writer::create_xref_stream(&xref, XRefStreamFilter::None).unwrap();
+
+                trailer.set("Index", indexes);
+                trailer.set("Length", stream_length as i64);
+
+                let cross_reference_stream = Stream(Stream {
+                    dict: trailer.clone(),
+                    allows_compression: true,
+                    content: xref_stream,
+                    start_position: None,
+                });
+
+                ((new_xref_id, new_xref_gen), cross_reference_stream)
+            }
+        };
+
+        let mut xref_bytes = Vec::<u8>::new();
+        Writer::_write_indirect_object(&mut xref_bytes, xref_id, xref_gen, &xref_obj).unwrap();
+
+        let mut xref_updated_buffer =
+            Self::replace_range_in_buffer(buffer, xref_bytes, (xref_start as usize, xref_end as usize));
+        Writer::update_xref_offset(&mut xref_updated_buffer, new_xref_start as i64).unwrap();
+
+        xref_updated_buffer
+    }
+
+    pub fn append_object(&mut self, object: &Object) -> Result<ObjectId> {
+        let reader = Reader {
+            buffer: &self.bytes_documents,
+            document: Document::new(), // We don't need the document here
+        };
+        let id = self.document.new_object_id();
+        let object_bytes = object.as_bytes(id);
+        let increased_length = object_bytes.len() as i64;
+        let mut new_object_offset = 0;
+
+        let mut new_document_bytes =
+            Self::update_xref(
+                &self.bytes_documents,
+                &mut |xref: &mut Xref, shift: fn(&mut Xref, usize, isize)| {
+                    let mut all_object_offsets = xref
+                        .entries
+                        .iter()
+                        .filter_map(|(_, entry)| match entry {
+                            XrefEntry::Normal { offset, generation: _ } => Some(*offset),
+                            _ => None,
+                        })
+                        .collect::<Vec<u32>>();
+                    all_object_offsets.sort();
+
+                    let last_object_before_xref = all_object_offsets[all_object_offsets.len() - 2];
+                    let (_, _, last_object_length) = reader
+                        .read_object(last_object_before_xref as usize, None, &mut HashSet::new())
+                        .unwrap();
+                    new_object_offset = last_object_before_xref + last_object_length as u32;
+
+                    shift(xref, new_object_offset as usize, increased_length as isize);
+                    increased_length
+                },
+            );
+        new_document_bytes = Self::inject_at_position(&new_document_bytes, object_bytes, new_object_offset as usize);
+
+        self.verify_buffer(new_document_bytes)?;
+        Ok(id)
+    }
+
+    // TODO: This doesn't work for now because of below error
+    // ```
+    // thread 'main' panicked at examples/extract_text.rs:201:34:
+    // called `Result::unwrap()` on an `Err` value: Custom { kind: InvalidData, error: "IO error: failed to fill whole buffer" }
+    // stack backtrace:
+    //    0: rust_begin_unwind
+    //              at /rustc/79e9716c980570bfd1f666e3b16ac583f0168962/library/std/src/panicking.rs:597:5
+    //    1: core::panicking::panic_fmt
+    //              at /rustc/79e9716c980570bfd1f666e3b16ac583f0168962/library/core/src/panicking.rs:72:14
+    //    2: core::result::unwrap_failed
+    //              at /rustc/79e9716c980570bfd1f666e3b16ac583f0168962/library/core/src/result.rs:1652:5
+    //    3: core::result::Result<T,E>::unwrap
+    //              at /rustc/79e9716c980570bfd1f666e3b16ac583f0168962/library/core/src/result.rs:1077:23
+    //    4: extract_text::pdf2text
+    //              at ./examples/extract_text.rs:201:5
+    //    5: extract_text::main
+    //              at ./examples/extract_text.rs:226:5
+    //    6: core::ops::function::FnOnce::call_once
+    //              at /rustc/79e9716c980570bfd1f666e3b16ac583f0168962/library/core/src/ops/function.rs:250:5
+    // note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+    // ```
+    // pub fn delete_object(&mut self, id: ObjectId) -> Result<()> {
+    //     let reader = Reader {
+    //         buffer: &self.bytes_documents,
+    //         document: Document::new(), // We don't need the document here
+    //     };
+    //     let object_offset = self.get_object_offset(id).unwrap();
+    //     let (_, _, object_length) = reader
+    //         .read_object(object_offset as usize, Some(id), &mut HashSet::new())
+    //         .unwrap();
+    //     let object_end_offset = object_offset + object_length as u32;
+    //     let decreased_length = object_length as i64;
+
+    //     let mut new_document_bytes = Self::update_xref(&self.bytes_documents, &mut |xref: &mut Xref| {
+    //         xref.entries.remove(&id.0);
+    //         for (_, entry) in xref.entries.iter_mut() {
+    //             if let XrefEntry::Normal { offset, generation: _ } = entry {
+    //                 if *offset > object_offset {
+    //                     *offset -= decreased_length as u32;
+    //                 }
+    //             }
+    //         }
+    //         -decreased_length
+    //     });
+    //     new_document_bytes = Self::replace_range_in_buffer(
+    //         &new_document_bytes,
+    //         Vec::new(),
+    //         (object_offset as usize, object_end_offset as usize),
+    //     );
+
+    //     self.verify_buffer(new_document_bytes)
+    // }
+
+    pub fn update_object(&mut self, id: ObjectId, object: &Object) -> Result<()> {
+        let reader = Reader {
+            buffer: &self.bytes_documents,
+            document: Document::new(), // We don't need the document here
+        };
+
+        let object_offset = self.get_object_offset(id).unwrap();
+        let (_, _, object_length) = reader
+            .read_object(object_offset as usize, Some(id), &mut HashSet::new())
+            .unwrap();
+
+        // if there is two \n\n, then make it single \n ( now we're doing it with -1 )
+        let object_end_offset = object_offset + object_length as u32 - 1;
+
+        let prev_object_bytes = self.bytes_documents[object_offset as usize..object_end_offset as usize].to_vec();
+
+        let new_object_bytes = object.as_bytes(id);
+        let new_object_length = new_object_bytes.len() as u32;
+        let increased_length = new_object_length as isize - prev_object_bytes.len() as isize;
+
+        let mut new_document_bytes =
+            Self::update_xref(
+                &self.bytes_documents,
+                &mut |xref: &mut Xref, shift: fn(&mut Xref, usize, isize)| {
+                    shift(xref, object_offset as usize, increased_length as isize);
+                    increased_length as i64
+                },
+            );
+
+        new_document_bytes = Self::replace_range_in_buffer(
+            &new_document_bytes,
+            new_object_bytes,
+            (object_offset as usize, object_end_offset as usize),
+        );
+
+        debug!("---");
+        parser::debug_nearby_bytes_by_cursor(&new_document_bytes, object_offset as usize);
+        parser::debug_nearby_bytes_by_cursor(&new_document_bytes, object_offset as usize + new_object_length as usize);
+
+        self.verify_buffer(new_document_bytes)
+    }
+}
+
 pub struct Writer;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -208,13 +580,16 @@ pub enum XRefStreamFilter {
 
 impl Writer {
     fn need_separator(object: &Object) -> bool {
-        matches!(*object, Null | Boolean(_) | Integer(_) | Real(_) | Reference(_))
+        matches!(
+            *object,
+            Null | Boolean(_) | Integer(_) | Real(_) | Reference(_) | Name(_)
+        )
     }
 
     fn need_end_separator(object: &Object) -> bool {
         matches!(
             *object,
-            Null | Boolean(_) | Integer(_) | Real(_) | Name(_) | Reference(_) | Object::Stream(_)
+            Null | Boolean(_) | Integer(_) | Real(_) | Name(_) | Reference(_)
         )
     }
 
@@ -264,8 +639,73 @@ impl Writer {
         Ok(())
     }
 
+    fn update_xref_offset(input: &mut Vec<u8>, new_offset: i64) -> Result<()> {
+        // Locate "%%EOF" by searching for its byte sequence
+        let eof_index = input
+            .windows(5) // Length of "%%EOF"
+            .rposition(|window| window == b"%%EOF")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing %%EOF"))?;
+
+        // Locate "startxref" before "%%EOF"
+        let startxref_index = input[..eof_index]
+            .windows(9) // Length of "startxref"
+            .rposition(|window| window == b"startxref")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing startxref"))?;
+
+        // Calculate the start and end of the current offset
+        let offset_start = startxref_index + 10; // "startxref\n".len()
+        let offset_end = input[offset_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| offset_start + i)
+            .unwrap_or(eof_index);
+
+        // Ensure indices are valid
+        if offset_start >= offset_end || startxref_index >= eof_index {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid PDF structure: startxref and %%EOF are out of order",
+            ));
+        }
+
+        // Create the new "startxref" line as bytes
+        let new_startxref_line = format!("{}", new_offset);
+        let new_line_bytes = new_startxref_line.as_bytes();
+
+        // Calculate the space difference
+        let space_needed = new_line_bytes.len() as isize - (offset_end - offset_start) as isize;
+
+        if space_needed > 0 {
+            // Expand the buffer to fit the new line
+            let additional_space = space_needed as usize;
+            input.resize(input.len() + additional_space, 0);
+
+            // Adjust the slice to make room for the new data
+            let move_start = offset_end;
+            let move_end = input.len() - additional_space;
+            let move_to = offset_end + additional_space;
+
+            // Ensure valid ranges for copy_within
+            if move_to <= input.len() {
+                input.copy_within(move_start..move_end, move_to);
+            }
+        }
+
+        // Write the new offset into the buffer
+        input[offset_start..offset_start + new_line_bytes.len()].copy_from_slice(new_line_bytes);
+
+        // If the new line is shorter, fill the remaining space with spaces
+        if space_needed < 0 {
+            for i in (offset_start + new_line_bytes.len())..offset_end {
+                input[i] = b' ';
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create stream for Cross reference stream.
-    fn create_xref_steam(xref: &Xref, filter: XRefStreamFilter) -> Result<(Vec<u8>, usize, Object)> {
+    fn create_xref_stream(xref: &Xref, filter: XRefStreamFilter) -> Result<(Vec<u8>, usize, Object)> {
         let mut xref_sections = Vec::new();
         let mut xref_section = XrefSection::new(0);
 
@@ -317,6 +757,9 @@ impl Writer {
                         xref_stream.push(1);
                         xref_stream.extend(offset.to_be_bytes());
                         xref_stream.extend(generation.to_be_bytes());
+                        // TODO: Check if this is correct
+                        // THIS NEED ON pdf 1.7. why????????
+                        // xref_stream.extend(vec![0, 0]); // TODO add generation number
                     }
                     XrefEntry::Compressed { container, index } => {
                         // Type 2
@@ -342,11 +785,7 @@ impl Writer {
         Ok((xref_stream, stream_length, Array(xref_index)))
     }
 
-    fn write_indirect_object<W: Write>(
-        file: &mut CountingWrite<&mut W>, id: u32, generation: u16, object: &Object, xref: &mut Xref,
-    ) -> Result<()> {
-        let offset = file.bytes_written as u32;
-        xref.insert(id, XrefEntry::Normal { offset, generation });
+    pub fn _write_indirect_object<W: Write>(file: &mut W, id: u32, generation: u16, object: &Object) -> Result<()> {
         write!(
             file,
             "{} {} obj\n{}",
@@ -361,6 +800,14 @@ impl Writer {
             if Writer::need_end_separator(object) { " " } else { "" }
         )?;
         Ok(())
+    }
+
+    fn write_indirect_object<W: Write>(
+        file: &mut CountingWrite<&mut W>, id: u32, generation: u16, object: &Object, xref: &mut Xref,
+    ) -> Result<()> {
+        let offset = file.bytes_written as u32;
+        xref.insert(id, XrefEntry::Normal { offset, generation });
+        Writer::_write_indirect_object(file, id, generation, object)
     }
 
     pub fn write_object(file: &mut dyn Write, object: &Object) -> Result<()> {
@@ -476,16 +923,24 @@ impl Writer {
                 file.write_all(b" ")?;
             }
             Writer::write_object(file, value)?;
+            if Writer::need_end_separator(value) {
+                file.write_all(b" ")?;
+            }
         }
         file.write_all(b">>")?;
         Ok(())
     }
 
+    pub fn write_stream_content(file: &mut dyn Write, content: &[u8]) -> Result<()> {
+        file.write_all(b"\nstream\n")?;
+        file.write_all(content)?;
+        file.write_all(b"\nendstream")?;
+        Ok(())
+    }
+
     fn write_stream(file: &mut dyn Write, stream: &Stream) -> Result<()> {
         Writer::write_dictionary(file, &stream.dict)?;
-        file.write_all(b"stream\n")?;
-        file.write_all(&stream.content)?;
-        file.write_all(b"\nendstream")?;
+        Writer::write_stream_content(file, &stream.content)?;
         Ok(())
     }
 

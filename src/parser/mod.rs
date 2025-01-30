@@ -1,5 +1,5 @@
 #[cfg(feature = "nom_parser")]
-use super::{Dictionary, Object, ObjectId, Reader, Stream, StringFormat};
+use super::{Dictionary, Object, ObjectId, Reader, Result as OResult, Stream, StringFormat};
 use crate::content::*;
 use crate::error;
 use crate::xref::*;
@@ -7,6 +7,7 @@ use crate::Error;
 use std::collections::HashSet;
 use std::str::{self, FromStr};
 
+use log::debug;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take, take_while, take_while1, take_while_m_n};
 use nom::character::complete::multispace1;
@@ -20,6 +21,7 @@ use nom::multi::{fold_many0, fold_many1, many0, many0_count};
 use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
 use nom::AsBytes;
 use nom::IResult;
+use nom::Offset;
 use nom::Slice;
 use nom_locate::LocatedSpan;
 
@@ -31,6 +33,43 @@ pub(crate) type ParserInput<'a> = LocatedSpan<&'a [u8], &'a str>;
 pub(crate) type NomError<'a> = nom::error::Error<ParserInput<'a>>;
 
 pub(crate) type NomResult<'a, O, E = NomError<'a>> = IResult<ParserInput<'a>, O, E>;
+
+pub fn debug_nearby_bytes_by_cursor(buffer: &[u8], cursor: usize) -> OResult<()> {
+    let get_safe_range = |buf: &[u8], center: usize, radius: usize| {
+        let start = center.saturating_sub(radius);
+        let end = (center + radius).min(buf.len());
+        (start, buf[start..end].to_vec())
+    };
+
+    // Helper to format ASCII output safely
+    let format_ascii_with_markers = |buf: &[u8], marker: usize, marker_label: &str| -> String {
+        let mut result = String::new();
+
+        // Use from_utf8_lossy to handle invalid UTF-8 safely
+        let readable_str = String::from_utf8_lossy(buf);
+
+        for (i, c) in readable_str.chars().enumerate() {
+            if i == marker {
+                result.push_str(&format!("[{} is here]", marker_label));
+            }
+            match c {
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                _ if c.is_control() => result.push_str(&format!("\\x{:02X}", c as u8)), // Escape other control characters
+                _ => result.push(c),
+            }
+        }
+        result
+    };
+
+    let range = 40;
+    let (_, nearby_bytes) = get_safe_range(buffer, cursor, range);
+    let ascii_output = format_ascii_with_markers(&nearby_bytes, range, "cursor");
+    debug!("|{}| ...{}..", cursor, ascii_output);
+
+    Ok(())
+}
 
 #[inline]
 fn strip_nom<O>(r: NomResult<O>) -> Option<O> {
@@ -381,18 +420,19 @@ fn object<'a>(input: ParserInput<'a>, reader: &Reader, already_seen: &mut HashSe
 pub fn indirect_object(
     input: ParserInput, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
     already_seen: &mut HashSet<ObjectId>,
-) -> crate::Result<(ObjectId, Object)> {
-    let (id, mut object) = _indirect_object(input.slice(offset..), offset, expected_id, reader, already_seen)?;
+) -> crate::Result<(ObjectId, Object, usize)> {
+    let (id, mut object, end_offset) =
+        _indirect_object(input.slice(offset..), offset, expected_id, reader, already_seen)?;
 
     offset_stream(&mut object, offset);
 
-    Ok((id, object))
+    Ok((id, object, end_offset))
 }
 
 fn _indirect_object<'a>(
     input: ParserInput<'a>, offset: usize, expected_id: Option<ObjectId>, reader: &Reader,
     already_seen: &mut HashSet<ObjectId>,
-) -> crate::Result<(ObjectId, Object)> {
+) -> crate::Result<(ObjectId, Object, usize)> {
     let (i, (_, object_id)) = terminated(tuple((space, object_id)), pair(tag(b"obj"), space))(input)
         .map_err(|_| Error::IndirectObject { offset })?;
     if let Some(expected_id) = expected_id {
@@ -402,15 +442,17 @@ fn _indirect_object<'a>(
     }
 
     let object_offset = input.len() - i.len();
-    let (_, mut object) = terminated(
+    let (loc, mut object) = terminated(
         |i: ParserInput<'a>| object(i, reader, already_seen),
         tuple((space, opt(tag(b"endobj")), space)),
     )(i)
     .map_err(|_| Error::IndirectObject { offset })?;
 
+    let length = loc.location_offset() - offset;
+
     offset_stream(&mut object, object_offset);
 
-    Ok((object_id, object))
+    Ok((object_id, object, length))
 }
 
 pub fn header(input: ParserInput) -> Option<String> {
@@ -484,9 +526,9 @@ pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(X
         xref_trailer,
         (|input| {
             _indirect_object(input, 0, None, reader, &mut HashSet::new())
-                .map(|(_, obj)| {
+                .map(|(_, obj, size)| {
                     let res = match obj {
-                        Object::Stream(stream) => decode_xref_stream(stream),
+                        Object::Stream(stream) => decode_xref_stream(stream, size),
                         _ => Err(crate::error::ParseError::InvalidXref.into()),
                     };
                     (input, res)
@@ -498,7 +540,9 @@ pub fn xref_and_trailer(input: ParserInput, reader: &Reader) -> crate::Result<(X
         }),
     ))(input)
     .map(|(_, o)| o)
-    .map_err(|_| error::ParseError::InvalidTrailer)?
+    .map_err(|e| {
+        error::ParseError::InvalidTrailer
+    })?
 }
 
 pub fn xref_start(input: ParserInput) -> Option<i64> {
@@ -728,24 +772,24 @@ T* (encoded streams.) Tj
     fn big_generation_value() {
         let input = b"xref
 0 1
-0000000000 65536 f 
+0000000000 65536 f
 0 16
-0000000000 65535 f 
-0000153238 00000 n 
-0000000019 00000 n 
-0000000313 00000 n 
-0000000333 00000 n 
-0000145531 00000 n 
-0000153407 00000 n 
-0000145554 00000 n 
-0000152303 00000 n 
-0000152324 00000 n 
-0000152514 00000 n 
-0000152880 00000 n 
-0000153106 00000 n 
-0000153139 00000 n 
-0000153532 00000 n 
-0000153629 00000 n 
+0000000000 65535 f
+0000153238 00000 n
+0000000019 00000 n
+0000000313 00000 n
+0000000333 00000 n
+0000145531 00000 n
+0000153407 00000 n
+0000145554 00000 n
+0000152303 00000 n
+0000152324 00000 n
+0000152514 00000 n
+0000152880 00000 n
+0000153106 00000 n
+0000153139 00000 n
+0000153532 00000 n
+0000153629 00000 n
 trailer
 <</Size 16/Root 14 0 R
 /Info 15 0 R
@@ -766,7 +810,7 @@ startxref
     #[test]
     fn space_in_startxref_number() {
         let input = b"startxref
-153804 
+153804
 %%EOF
 ";
         match xref_start(test_span(input)) {

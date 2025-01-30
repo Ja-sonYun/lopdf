@@ -11,7 +11,9 @@ pub mod xref;
 #[macro_use]
 mod object;
 mod document;
+mod editor;
 mod incremental_document;
+mod overwrite_document;
 
 mod bookmarks;
 mod cmap_section;
@@ -34,6 +36,7 @@ mod reader;
 
 pub use document::Document;
 pub use object::{Dictionary, Object, ObjectId, Stream, StringFormat};
+pub use overwrite_document::OverwriteDocument;
 
 pub use bookmarks::Bookmark;
 pub use common_data_structures::{decode_text_string, text_string};

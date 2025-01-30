@@ -13,6 +13,9 @@ pub struct Xref {
 
     /// Total number of entries (including free entries), equal to the highest object number plus 1.
     pub size: u32,
+
+    /// Xref original bytes length.
+    pub bytes_len: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +31,7 @@ pub enum XrefEntry {
     Free, // TODO add generation number
     UnusableFree,
     Normal { offset: u32, generation: u16 },
-    Compressed { container: u32, index: u16 },
+    Compressed { container: u32, index: u16 },  // TODO: CHECK COMPRESSED LATER
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ impl Xref {
             cross_reference_type: xref_type,
             entries: BTreeMap::new(),
             size,
+            bytes_len: None,
         }
     }
 
