@@ -1,6 +1,14 @@
+<<<<<<< HEAD
 use lopdf::{content::Content, Dictionary, Document, Object, OverwriteDocument, Stream, StringFormat};
 use std::collections::BTreeMap;
 use std::io::Read;
+=======
+use fontdb::{Database, Family};
+use lopdf::{content::Content, Dictionary, Document, Object, OverwriteDocument, Stream, StringFormat};
+use std::collections::BTreeMap;
+use std::io::Read;
+use ttf_parser::Face;
+>>>>>>> 202afb8 (WIP)
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -157,7 +165,12 @@ fn pdf2text<P: AsRef<Path> + Debug>(path: P, output: P, password: &str) -> Resul
         debug!("Document is encrypted");
         ovdoc.set_password("".to_string());
     }
+<<<<<<< HEAD
     ovdoc.replace_text("株式", "██").unwrap();
+=======
+    // ovdoc.highlight_text("会社").unwrap();
+    ovdoc.redact_text("株式会社").unwrap();
+>>>>>>> 202afb8 (WIP)
     ovdoc.save(&output).unwrap();
     // ovdoc.append_object(&new_object).unwrap();
     // ovdoc.update_object((id, 0), &new_object).unwrap();

@@ -94,10 +94,17 @@ impl Encoding<'_> {
     pub fn string_to_bytes(&self, text: &str) -> Vec<u8> {
         match self {
             Self::OneByteEncoding(map) => string_to_bytes(map, text),
+<<<<<<< HEAD
             Self::SimpleEncoding(b"UniGB-UCS2-H")
             | Self::SimpleEncoding(b"UniGB-UTF16-H")
             | Self::SimpleEncoding(b"UniJIS-UTF16-H")
             | Self::SimpleEncoding(b"UniJIS-UCS2-H") => encode_utf16_be(text),
+=======
+            Self::SimpleEncoding(b"UniGB-UCS2-H") | Self::SimpleEncoding(b"UniGB-UTF16-H") => encode_utf16_be(text),
+            Self::SimpleEncoding(b"UniJIS-UTF16-H") | Self::SimpleEncoding(b"UniJIS-UCS2-H") => {
+                encode_fixed_utf16_be(text)
+            }
+>>>>>>> 202afb8 (WIP)
             Self::UnicodeMapEncoding(_unicode_map) => {
                 // maybe only possible if the unicode map is an identity?
                 unimplemented!()
@@ -118,6 +125,15 @@ pub fn encode_utf16_be(text: &str) -> Vec<u8> {
     let bom: u16 = 0xFEFF;
     let mut bytes = vec![];
     bytes.extend([bom].iter().flat_map(|b| b.to_be_bytes()));
+    bytes.extend(text.encode_utf16().flat_map(|b| b.to_be_bytes()));
+    bytes
+}
+
+/// Encodes the given `str` to UniJIS-XXX
+/// UniJIS-XXX encoding render the BOM character as an empty character.
+/// TODO: Fix this. all of pdf that I have and encoded with UniJIS-XXX doesn't include BOM.
+pub fn encode_fixed_utf16_be(text: &str) -> Vec<u8> {
+    let mut bytes = vec![];
     bytes.extend(text.encode_utf16().flat_map(|b| b.to_be_bytes()));
     bytes
 }

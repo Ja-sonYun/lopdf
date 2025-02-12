@@ -1,5 +1,6 @@
 {
   "nodes": {
+<<<<<<< HEAD
     "cargo2nix": {
       "inputs": {
         "flake-compat": "flake-compat",
@@ -38,16 +39,26 @@
         "type": "github"
       }
     },
+=======
+>>>>>>> 202afb8 (WIP)
     "flake-utils": {
       "inputs": {
         "systems": "systems"
       },
       "locked": {
+<<<<<<< HEAD
         "lastModified": 1694529238,
         "narHash": "sha256-zsNZZGTGnMOf9YpHKJqMSsa0dXbfmxeoJ7xHlrt+xmY=",
         "owner": "numtide",
         "repo": "flake-utils",
         "rev": "ff7b65b44d01cf9ba6a71320833626af21126384",
+=======
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+>>>>>>> 202afb8 (WIP)
         "type": "github"
       },
       "original": {
@@ -58,22 +69,35 @@
     },
     "nixpkgs": {
       "locked": {
+<<<<<<< HEAD
         "lastModified": 1705099185,
         "narHash": "sha256-SxJenKtvcrKJd0TyJQMO3p6VA7PEp+vmMnmlKFzWMNs=",
         "owner": "nixos",
         "repo": "nixpkgs",
         "rev": "2bce5ccff0ad7abda23e8bb56434b6877a446694",
+=======
+        "lastModified": 1738517419,
+        "narHash": "sha256-tttEXgKimgbtPvxFl+Avos4P4lssIqxHhxpLbbvNekk=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "8532db2a88ba56de9188af72134d93e39fd825f3",
+>>>>>>> 202afb8 (WIP)
         "type": "github"
       },
       "original": {
         "owner": "nixos",
+<<<<<<< HEAD
         "ref": "release-23.11",
+=======
+        "ref": "nixpkgs-unstable",
+>>>>>>> 202afb8 (WIP)
         "repo": "nixpkgs",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
+<<<<<<< HEAD
         "cargo2nix": "cargo2nix",
         "flake-utils": [
           "cargo2nix",
@@ -108,6 +132,10 @@
         "owner": "oxalica",
         "repo": "rust-overlay",
         "type": "github"
+=======
+        "flake-utils": "flake-utils",
+        "nixpkgs": "nixpkgs"
+>>>>>>> 202afb8 (WIP)
       }
     },
     "systems": {

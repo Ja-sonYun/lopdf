@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   inputs = {
     # cargo2nix.url = "github:cargo2nix/cargo2nix";
     # Use a github flake URL for real packages
@@ -45,3 +46,34 @@
       }
     );
 }
+=======
+  description = "";
+
+  inputs = {
+    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+  };
+
+  outputs = { self, flake-utils, nixpkgs }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+        };
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            rustc
+            cargo
+
+            python310
+            maturin
+          ];
+          shellHook = ''
+          '';
+        };
+      });
+}
+
+>>>>>>> 202afb8 (WIP)

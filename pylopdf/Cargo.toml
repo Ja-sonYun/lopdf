@@ -1,0 +1,13 @@
+[package]
+name = "pylopdf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "pylopdf"
+crate-type = ["cdylib"]
+
+[dependencies]
+lopdf = { version = "0.35.0", path = ".." }
+pyo3 = "0.23.3"

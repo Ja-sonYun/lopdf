@@ -12,8 +12,15 @@ pub mod xref;
 mod object;
 mod document;
 mod editor;
+<<<<<<< HEAD
 mod incremental_document;
 mod overwrite_document;
+=======
+mod fonts;
+mod incremental_document;
+mod overwrite_document;
+mod styles;
+>>>>>>> 202afb8 (WIP)
 
 mod bookmarks;
 mod cmap_section;

@@ -104,7 +104,11 @@ impl Document {
         // Note that `ASCIIHexDecode` does not work correctly,
         // but is still useful for debugging sometimes.
         let filter = XRefStreamFilter::None;
+<<<<<<< HEAD
         let (stream, stream_length, indexes) = Writer::create_xref_stream(xref, filter)?;
+=======
+        let (stream, stream_length, indexes) = Writer::create_xref_stream(xref, filter, &self.version)?;
+>>>>>>> 202afb8 (WIP)
         self.trailer.set("Index", indexes);
 
         if filter == XRefStreamFilter::ASCIIHexDecode {
@@ -228,12 +232,26 @@ impl OverwriteDocument {
         Ok(())
     }
 
+<<<<<<< HEAD
     pub fn replace_text(&mut self, text: &str, replacement: &str) -> Result<()> {
         let mut should_be_updated = Vec::<(ObjectId, Object)>::new();
 
         for page_id in self.document.page_iter() {
             println!("Page id: {:?}", page_id);
             let encodings = self.document.get_encodings(page_id).unwrap();
+=======
+    fn modify_objects<F>(&mut self, applier: F) -> Result<()>
+    where
+        F: for<'a> Fn(&'a Document, ObjectId, &Object) -> Result<Object>,
+    {
+        let mut should_be_updated = Vec::<(ObjectId, Object)>::new();
+
+        for page_id in self.document.page_iter() {
+            debug!("Debug page id: {}", page_id.0);
+            // if page_id.0 != 25 {
+            //     continue;
+            // }
+>>>>>>> 202afb8 (WIP)
             let object_ids = self.document.get_page_contents(page_id);
             let objects = object_ids
                 .iter()
@@ -249,6 +267,7 @@ impl OverwriteDocument {
                 })
                 .collect::<Vec<_>>();
 
+<<<<<<< HEAD
             println!("objects: {:?}", objects.len());
 
             for (object_id, object) in objects {
@@ -260,6 +279,10 @@ impl OverwriteDocument {
                         .replace_text(&encodings, text, replacement)
                         .unwrap(),
                 );
+=======
+            for (object_id, object) in objects {
+                let mut refined_object = applier(&self.document, page_id, &object)?;
+>>>>>>> 202afb8 (WIP)
                 if self.document.is_encrypted() {
                     let password = self.password.as_ref().unwrap();
                     self.document
@@ -268,6 +291,7 @@ impl OverwriteDocument {
                 }
                 should_be_updated.push((object_id.clone(), refined_object));
             }
+<<<<<<< HEAD
         }
 
         // let target_obj = should_be_updated[1].1.clone();
@@ -285,10 +309,49 @@ impl OverwriteDocument {
     fn verify_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
         self.document = Reader {
             buffer: &buffer,
+=======
+            if should_be_updated.len() > 50 {
+                break;
+            }
+        }
+
+        self.update_objects(&should_be_updated).unwrap();
+        Ok(())
+    }
+
+    pub fn redact_text(&mut self, text: &str) -> Result<()> {
+        self.modify_objects(|document: &Document, page_id: ObjectId, object: &Object| {
+            Ok(Object::from(
+                object
+                    .as_stream()
+                    .unwrap()
+                    .redact_text(document, page_id, text)
+                    .unwrap(),
+            ))
+        })
+    }
+
+    pub fn highlight_text(&mut self, text: &str) -> Result<()> {
+        self.modify_objects(|document: &Document, page_id: ObjectId, object: &Object| {
+            Ok(Object::from(
+                object
+                    .as_stream()
+                    .unwrap()
+                    .highlight_text(document, page_id, text)
+                    .unwrap(),
+            ))
+        })
+    }
+
+    fn verify_buffer(&mut self) -> Result<()> {
+        self.document = Reader {
+            buffer: &self.bytes_documents,
+>>>>>>> 202afb8 (WIP)
             document: Document::new(),
         }
         .read(None)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+<<<<<<< HEAD
         self.bytes_documents = buffer;
         Ok(())
     }
@@ -342,14 +405,62 @@ impl OverwriteDocument {
     fn update_xref<F: FnMut(&mut Xref, fn(&mut Xref, usize, isize)) -> i64>(
         buffer: &Vec<u8>, updater: &mut F,
     ) -> Vec<u8> {
+=======
+        Ok(())
+    }
+
+    fn inject_at_position(buffer: &mut Vec<u8>, data: Vec<u8>, position: usize) {
+        if position > buffer.len() {
+            panic!("Invalid position specified!");
+        }
+        buffer.splice(position..position, data);
+    }
+
+    fn replace_range_in_buffer(buffer: &mut Vec<u8>, data: Vec<u8>, range: (usize, usize)) {
+        let (start_offset, end_offset) = range;
+        if start_offset > buffer.len() || end_offset > buffer.len() || start_offset > end_offset {
+            panic!("Invalid range specified!");
+        }
+        buffer.splice(start_offset..end_offset, data);
+    }
+
+    fn get_xref(buffer: &Vec<u8>) -> Result<((usize, usize), (Xref, Dictionary))> {
+>>>>>>> 202afb8 (WIP)
         let reader = Reader {
             buffer: &buffer,
             document: Document::new(), // We don't need the document here
         };
         let (xref_start, xref_end) = Reader::get_xref_range(buffer).unwrap();
+<<<<<<< HEAD
         let (mut xref, mut trailer) =
             parser::xref_and_trailer(ParserInput::new_extra(&buffer[xref_start..], "xref"), &reader).unwrap();
 
+=======
+        let (xref, trailer) =
+            parser::xref_and_trailer(ParserInput::new_extra(&buffer[xref_start..], "xref"), &reader).unwrap();
+
+        Ok(((xref_start, xref_end), (xref, trailer)))
+    }
+
+    fn update_xref<F: FnMut(&mut Xref, fn(&mut Xref, usize, isize)) -> i64>(
+        buffer: &mut Vec<u8>, updater: &mut F, xref: Option<((usize, usize), (Xref, Dictionary))>,
+    ) {
+        let version = parser::header(ParserInput::new_extra(buffer, "header")).unwrap();
+        let reader = Reader {
+            buffer: &buffer,
+            document: Document::new(), // We don't need the document here
+        };
+
+        let ((xref_start, xref_end), (mut xref, mut trailer)) = if let Some(((start, end), (xref, trailer))) = xref {
+            ((start, end), (xref, trailer))
+        } else {
+            let (xref_start, xref_end) = Reader::get_xref_range(buffer).unwrap();
+            let (xref, trailer) =
+                parser::xref_and_trailer(ParserInput::new_extra(&buffer[xref_start..], "xref"), &reader).unwrap();
+            ((xref_start, xref_end), (xref, trailer))
+        };
+
+>>>>>>> 202afb8 (WIP)
         // Update the Xref
         let shift_length = updater(&mut xref, |xref: &mut Xref, updated_obj_offset, shift_length| {
             for (_, entry) in xref.entries.iter_mut() {
@@ -378,7 +489,11 @@ impl OverwriteDocument {
         let ((xref_id, xref_gen), xref_obj) = match find_xref_stream {
             Ok(((xref_id, xref_gen), mut xref_obj, _)) => {
                 // Expect a Stream xref object
+<<<<<<< HEAD
                 let (xref_stream, _, _) = Writer::create_xref_stream(&xref, XRefStreamFilter::None).unwrap();
+=======
+                let (xref_stream, _, _) = Writer::create_xref_stream(&xref, XRefStreamFilter::None, &version).unwrap();
+>>>>>>> 202afb8 (WIP)
                 let xref_stream_obj = xref_obj.as_stream_mut().unwrap();
                 if xref_stream_obj.dict.has(b"Filter") {
                     xref_stream_obj.decompress().unwrap();
@@ -407,7 +522,11 @@ impl OverwriteDocument {
                 trailer.set("W", Array(vec![Integer(1), Integer(4), Integer(2)]));
 
                 let (xref_stream, stream_length, indexes) =
+<<<<<<< HEAD
                     Writer::create_xref_stream(&xref, XRefStreamFilter::None).unwrap();
+=======
+                    Writer::create_xref_stream(&xref, XRefStreamFilter::None, &version).unwrap();
+>>>>>>> 202afb8 (WIP)
 
                 trailer.set("Index", indexes);
                 trailer.set("Length", stream_length as i64);
@@ -426,6 +545,7 @@ impl OverwriteDocument {
         let mut xref_bytes = Vec::<u8>::new();
         Writer::_write_indirect_object(&mut xref_bytes, xref_id, xref_gen, &xref_obj).unwrap();
 
+<<<<<<< HEAD
         let mut xref_updated_buffer =
             Self::replace_range_in_buffer(buffer, xref_bytes, (xref_start as usize, xref_end as usize));
         Writer::update_xref_offset(&mut xref_updated_buffer, new_xref_start as i64).unwrap();
@@ -436,6 +556,16 @@ impl OverwriteDocument {
     pub fn append_object(&mut self, object: &Object) -> Result<ObjectId> {
         let reader = Reader {
             buffer: &self.bytes_documents,
+=======
+        Self::replace_range_in_buffer(buffer, xref_bytes, (xref_start as usize, xref_end as usize));
+        Writer::update_xref_offset(buffer, new_xref_start as i64).unwrap();
+    }
+
+    pub fn append_object(&mut self, object: &Object) -> Result<ObjectId> {
+        let documents = self.bytes_documents.clone();
+        let reader = Reader {
+            buffer: &documents,
+>>>>>>> 202afb8 (WIP)
             document: Document::new(), // We don't need the document here
         };
         let id = self.document.new_object_id();
@@ -443,6 +573,7 @@ impl OverwriteDocument {
         let increased_length = object_bytes.len() as i64;
         let mut new_object_offset = 0;
 
+<<<<<<< HEAD
         let mut new_document_bytes =
             Self::update_xref(
                 &self.bytes_documents,
@@ -470,6 +601,35 @@ impl OverwriteDocument {
         new_document_bytes = Self::inject_at_position(&new_document_bytes, object_bytes, new_object_offset as usize);
 
         self.verify_buffer(new_document_bytes)?;
+=======
+        Self::update_xref(
+            &mut self.bytes_documents,
+            &mut |xref: &mut Xref, shift: fn(&mut Xref, usize, isize)| {
+                let mut all_object_offsets = xref
+                    .entries
+                    .iter()
+                    .filter_map(|(_, entry)| match entry {
+                        XrefEntry::Normal { offset, generation: _ } => Some(*offset),
+                        _ => None,
+                    })
+                    .collect::<Vec<u32>>();
+                all_object_offsets.sort();
+
+                let last_object_before_xref = all_object_offsets[all_object_offsets.len() - 2];
+                let (_, _, last_object_length) = reader
+                    .read_object(last_object_before_xref as usize, None, &mut HashSet::new())
+                    .unwrap();
+                new_object_offset = last_object_before_xref + last_object_length as u32;
+
+                shift(xref, new_object_offset as usize, increased_length as isize);
+                increased_length
+            },
+            None,
+        );
+        Self::inject_at_position(&mut self.bytes_documents, object_bytes, new_object_offset as usize);
+
+        self.verify_buffer()?;
+>>>>>>> 202afb8 (WIP)
         Ok(id)
     }
 
@@ -526,6 +686,7 @@ impl OverwriteDocument {
     //     self.verify_buffer(new_document_bytes)
     // }
 
+<<<<<<< HEAD
     pub fn update_object(&mut self, id: ObjectId, object: &Object) -> Result<()> {
         let reader = Reader {
             buffer: &self.bytes_documents,
@@ -549,10 +710,40 @@ impl OverwriteDocument {
         let mut new_document_bytes =
             Self::update_xref(
                 &self.bytes_documents,
+=======
+    pub fn update_objects(&mut self, objects: &[(ObjectId, Object)]) -> Result<()> {
+        for (id, object) in objects {
+            let reader = Reader {
+                buffer: &self.bytes_documents,
+                document: Document::new(), // We don't need the document here
+            };
+
+            let xref_info = Self::get_xref(&self.bytes_documents).unwrap();
+            let object_offset = match xref_info.1 .0.entries.get(&id.0).unwrap() {
+                XrefEntry::Normal { offset, generation: _ } => *offset,
+                _ => panic!("UnusableFree object not supported yet"),
+            };
+            let (_, _, object_length) = reader
+                .read_object(object_offset as usize, Some(*id), &mut HashSet::new())
+                .unwrap();
+
+            // if there is two \n\n, then make it single \n ( now we're doing it with -1 )
+            let object_end_offset = object_offset + object_length as u32 - 1;
+
+            let prev_object_bytes = self.bytes_documents[object_offset as usize..object_end_offset as usize].to_vec();
+
+            let new_object_bytes = object.as_bytes(*id);
+            let new_object_length = new_object_bytes.len() as u32;
+            let increased_length = new_object_length as isize - prev_object_bytes.len() as isize;
+
+            Self::update_xref(
+                &mut self.bytes_documents,
+>>>>>>> 202afb8 (WIP)
                 &mut |xref: &mut Xref, shift: fn(&mut Xref, usize, isize)| {
                     shift(xref, object_offset as usize, increased_length as isize);
                     increased_length as i64
                 },
+<<<<<<< HEAD
             );
 
         new_document_bytes = Self::replace_range_in_buffer(
@@ -566,6 +757,19 @@ impl OverwriteDocument {
         parser::debug_nearby_bytes_by_cursor(&new_document_bytes, object_offset as usize + new_object_length as usize);
 
         self.verify_buffer(new_document_bytes)
+=======
+                Some(xref_info),
+            );
+            Self::replace_range_in_buffer(
+                &mut self.bytes_documents,
+                new_object_bytes,
+                (object_offset as usize, object_end_offset as usize),
+            );
+        }
+
+        Ok(())
+        // self.verify_buffer()
+>>>>>>> 202afb8 (WIP)
     }
 }
 
@@ -705,7 +909,13 @@ impl Writer {
     }
 
     /// Create stream for Cross reference stream.
+<<<<<<< HEAD
     fn create_xref_stream(xref: &Xref, filter: XRefStreamFilter) -> Result<(Vec<u8>, usize, Object)> {
+=======
+    fn create_xref_stream(
+        xref: &Xref, filter: XRefStreamFilter, pdf_version: &str,
+    ) -> Result<(Vec<u8>, usize, Object)> {
+>>>>>>> 202afb8 (WIP)
         let mut xref_sections = Vec::new();
         let mut xref_section = XrefSection::new(0);
 
@@ -757,9 +967,20 @@ impl Writer {
                         xref_stream.push(1);
                         xref_stream.extend(offset.to_be_bytes());
                         xref_stream.extend(generation.to_be_bytes());
+<<<<<<< HEAD
                         // TODO: Check if this is correct
                         // THIS NEED ON pdf 1.7. why????????
                         // xref_stream.extend(vec![0, 0]); // TODO add generation number
+=======
+
+                        // TODO: Check this logic really okay
+                        match pdf_version {
+                            "1.7" => {
+                                xref_stream.extend(vec![0, 0]);
+                            }
+                            _ => {}
+                        }
+>>>>>>> 202afb8 (WIP)
                     }
                     XrefEntry::Compressed { container, index } => {
                         // Type 2

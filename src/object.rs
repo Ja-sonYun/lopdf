@@ -435,6 +435,7 @@ impl Dictionary {
                 Ok(Encoding::OneByteEncoding(&encodings::PDF_DOC_ENCODING))
             }
             Ok(b"UniGB-UCS2-H") => Ok(Encoding::SimpleEncoding(b"UniGB-UCS2-H")),
+<<<<<<< HEAD
             Ok(b"UniJIS-UCS2-H") | Ok(b"UniJIS-UTF16-H") => {
                 // NOTE: DescendantFonts is a one-element array according to the PDF1.7 spec
                 let cidfont_index = match self.get_deref(b"DescendantFonts", doc)? {
@@ -470,10 +471,13 @@ impl Dictionary {
                 };
                 Ok(Encoding::SimpleEncoding(b"UniJIS-UCS2-H"))
             }
+=======
+>>>>>>> 202afb8 (WIP)
             Ok(b"Identity-H") | Ok(b"Identity-V") => {
                 let stream = self.get_deref(b"ToUnicode", doc)?.as_stream()?;
                 self.get_encoding_from_to_unicode_cmap(stream)
             }
+            // Ok(b"UniJIS-UCS2-H") | Ok(b"UniJIS-UTF16-H") => Ok(Encoding::SimpleEncoding(b"UniJIS-UCS2-H")),
             Ok(name) => Ok(Encoding::SimpleEncoding(name)),
             Err(err) => {
                 warn!(

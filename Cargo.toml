@@ -26,6 +26,7 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 encoding = "0.2.33"
 encoding_rs = "0.8.32"
 flate2 = "1.0"
+fontdb = "0.23.0"
 image = { version = "0.25", optional = true }
 indexmap = "2.2.3"
 itoa = "1.0"
@@ -41,6 +42,7 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 thiserror = "2.0.3"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["fs", "io-util"], optional = true }
+ttf-parser = "0.25.1"
 weezl = "0.1"
 
 [dev-dependencies]

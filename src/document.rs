@@ -1,6 +1,7 @@
 use super::encodings::Encoding;
 use super::{Bookmark, Dictionary, Object, ObjectId};
 use crate::encryption;
+use crate::fonts::Fonts;
 use crate::xobject::PdfImage;
 use crate::xref::{Xref, XrefType};
 use crate::{Error, Result, Stream};
@@ -730,6 +731,23 @@ impl Document {
 
         Ok(encodings)
     }
+<<<<<<< HEAD
+=======
+
+    pub fn get_font(&self, page_id: ObjectId, id: &[u8]) -> Result<Option<Fonts>> {
+        let fonts = self.get_page_fonts(page_id)?;
+        let dict = fonts.get(id);
+        if dict.is_none() {
+            return Ok(None);
+        }
+        let font_name = dict.unwrap().get(b"BaseFont")?.as_name()?;
+        let font_name_str = String::from_utf8_lossy(font_name);
+        // let font = Fonts::new(&font_name_str);
+        let font = Fonts::from_path("/Users/jasony/Downloads/temp/ms-gothic.ttf");
+
+        Ok(Some(font))
+    }
+>>>>>>> 202afb8 (WIP)
 }
 
 impl Default for Document {
